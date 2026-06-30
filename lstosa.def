@@ -37,11 +37,12 @@ Bootstrap: docker
 From: mambaorg/micromamba:1.5.8
 
 %files
-    # Copy the lstosa source into the image. Absolute host path so the build does
-    # NOT depend on the CWD you launch `singularity build` from; this copies the
-    # repo dir into /opt, giving /opt/lstosa/pyproject.toml. Installed editable so
-    # a runtime bind-mount over /opt/lstosa picks up live edits.
-    /fefs/aswg/workspace/guillaume.grolleron/project/lstosa /opt
+    # Copy the lstosa source into the image. Path is relative to the build CWD, so
+    # run `singularity build` from the repo root (the dir holding pyproject.toml).
+    # IMPORTANT: the synced tree must include .git — setuptools_scm derives the
+    # version from it at install time (the version is removed below, post-install).
+    # Installed editable so a runtime bind-mount over /opt/lstosa picks up edits.
+    . /opt/lstosa
 
 %post
     set -eux
