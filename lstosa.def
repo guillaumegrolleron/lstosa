@@ -60,21 +60,27 @@ From: mambaorg/micromamba:1.5.8
     # lstchain=0.12.2 constrains ctapipe 0.25.x / ctapipe_io_lst 0.29.x / gammapy 1.3,
     # matching the production environment. The extra packages are lstosa's
     # pure-python deps not necessarily dragged in by lstchain.
+    # lstchain from conda-forge brings the entire compiled stack (numpy, numba,
+    # llvmlite, protozfits, eventio, ctapipe, ctapipe_io_lst, gammapy, ...) in the
+    # SAME conda-forge builds the production host env uses — this is what fixed the
+    # pip-manylinux-wheel SIGSEGV crashes. lstchain=0.12.2 pins the matching
+    # ctapipe 0.25.x / ctapipe_io_lst 0.29.x / gammapy 1.3.
     micromamba install -y -n base -c conda-forge \
         python=3.11 pip git \
-        lstchain=0.12.2 \
-        pydot pydotplus prov pymongo toml psutil pyyaml click setuptools
+        lstchain=0.12.2 setuptools
     eval "$(micromamba shell hook --shell posix)"
     micromamba activate base
 
-    # ---- lstosa itself (--no-deps: the whole dependency tree is already provided
-    #      by conda-forge above, so pip must NOT pull any wheel that could
-    #      reintroduce a mismatched compiled build). Installed NON-editable so the
-    #      version is baked from .git now (fixes the "Could not determine lstosa
-    #      version" warning) and the image needs no /opt/lstosa at runtime.
+    # ---- lstosa itself. Install WITH deps so lstosa's own pyproject dependencies
+    #      (tenacity, toml, pydot, pydotplus, prov, pymongo, psutil, click, pyyaml)
+    #      are resolved automatically instead of hand-listed. The compiled stack is
+    #      already provided by conda-forge above and satisfies lstosa's version
+    #      pins, so pip leaves it untouched and only adds the missing PURE-PYTHON
+    #      packages (no risk of reintroducing a mismatched compiled wheel).
+    #      Non-editable so the version bakes from .git now (no runtime /opt/lstosa).
     #      For live development, bind your checkout and prepend PYTHONPATH=<co>/src.
     test -f /opt/lstosa/pyproject.toml || { echo "ERROR: lstosa source not copied — build from the repo root"; ls -la /opt/lstosa || true; exit 1; }
-    pip install --no-deps /opt/lstosa
+    pip install /opt/lstosa
 
     # ---- slim the image ----------------------------------------------------
     rm -rf /opt/lstosa
@@ -82,13 +88,18 @@ From: mambaorg/micromamba:1.5.8
     pip cache purge || true
     find /opt/conda -name '__pycache__' -type d -prune -exec rm -rf {} + || true
 
-    # quick import smoke-test (fails the build early if the env is broken)
+    # Smoke-test the actual entry-point modules (not just `import osa`) so a
+    # MISSING RUNTIME DEPENDENCY fails the BUILD here instead of a SLURM job.
     python - <<'PY'
 import lstchain, ctapipe, ctapipe_io_lst, osa
-print("lstchain", lstchain.__version__)
-print("ctapipe", ctapipe.__version__)
-print("ctapipe_io_lst", ctapipe_io_lst.__version__)
-print("osa OK")
+# These pull in osa.workflow.stages (tenacity), provenance, etc.
+import osa.scripts.datasequence
+import osa.scripts.sequencer
+import osa.scripts.sequencer_catB_tailcuts
+import osa.scripts.closer
+import osa.scripts.autocloser
+print("lstchain", lstchain.__version__, "| ctapipe", ctapipe.__version__,
+      "| ctapipe_io_lst", ctapipe_io_lst.__version__, "| osa entry points OK")
 PY
 
 %environment
@@ -117,7 +128,10 @@ PY
     # next to the (read-only) source; redirect it (see %environment).
     export NUMBA_CACHE_DIR=/tmp/numba-test
     python -c "import lstchain, ctapipe, ctapipe_io_lst, osa; print('container OK', lstchain.__version__)"
-    sequencer --help >/dev/null && echo "sequencer entrypoint OK"
+    # Exercise the console scripts the jobs actually call — catches missing deps
+    # like tenacity (imported via osa.workflow.stages) that `import osa` misses.
+    sequencer --help    >/dev/null && echo "sequencer entrypoint OK"
+    datasequence --help >/dev/null && echo "datasequence entrypoint OK"
 
 %labels
     Maintainer grolleron@lapp.in2p3.fr
