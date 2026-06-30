@@ -25,11 +25,10 @@
 ##       --bind /fefs/aswg,/fefs/onsite,/fefs/home \
 ##       lstosa_v0.12.sif datasequence ...
 ##
-##   # ACTIVE DEVELOPMENT of lstosa: bind your host checkout over /opt/lstosa so
-##   # your edits are live without rebuilding (the image installed it editable):
-##   singularity exec \
-##       --bind /fefs/aswg/workspace/guillaume.grolleron/project/lstosa:/opt/lstosa \
-##       --bind /fefs/aswg,/fefs/onsite,/fefs/home \
+##   # ACTIVE DEVELOPMENT of lstosa: lstosa is baked in (non-editable), so to run
+##   # your live checkout instead, prepend it on PYTHONPATH (no rebuild needed):
+##   singularity exec --bind /fefs/aswg,/fefs/onsite,/fefs/home \
+##       --env PYTHONPATH=/fefs/aswg/workspace/guillaume.grolleron/project/lstosa/src \
 ##       lstosa_v0.12.sif sequencer ...
 ## ─────────────────────────────────────────────────────────────────────────────
 
@@ -37,12 +36,16 @@ Bootstrap: docker
 From: mambaorg/micromamba:1.5.8
 
 %files
-    # Copy the lstosa source into the image. Path is relative to the build CWD, so
-    # run `singularity build` from the repo root (the dir holding pyproject.toml).
-    # IMPORTANT: the synced tree must include .git — setuptools_scm derives the
-    # version from it at install time (the version is removed below, post-install).
-    # Installed editable so a runtime bind-mount over /opt/lstosa picks up edits.
-    . /opt/lstosa
+    # Copy the lstosa source into the image. Sources are relative to the build CWD,
+    # so run `singularity build` from the repo root (the dir holding pyproject.toml).
+    # Items are listed explicitly instead of "." because Singularity's directory
+    # copy of "." is ambiguous and left /opt/lstosa without pyproject.toml.
+    # .git is required so setuptools_scm can derive the version at install time.
+    pyproject.toml /opt/lstosa/
+    MANIFEST.in /opt/lstosa/
+    README.md /opt/lstosa/
+    src /opt/lstosa/
+    .git /opt/lstosa/
 
 %post
     set -eux
@@ -64,13 +67,17 @@ From: mambaorg/micromamba:1.5.8
     eval "$(micromamba shell hook --shell posix)"
     micromamba activate base
 
-    # ---- lstosa itself (editable, --no-deps: the whole dependency tree is
-    #      already provided by conda-forge above, so pip must NOT pull any wheel
-    #      that could reintroduce a mismatched compiled build) ----------------
-    pip install --no-deps -e /opt/lstosa
+    # ---- lstosa itself (--no-deps: the whole dependency tree is already provided
+    #      by conda-forge above, so pip must NOT pull any wheel that could
+    #      reintroduce a mismatched compiled build). Installed NON-editable so the
+    #      version is baked from .git now (fixes the "Could not determine lstosa
+    #      version" warning) and the image needs no /opt/lstosa at runtime.
+    #      For live development, bind your checkout and prepend PYTHONPATH=<co>/src.
+    test -f /opt/lstosa/pyproject.toml || { echo "ERROR: lstosa source not copied — build from the repo root"; ls -la /opt/lstosa || true; exit 1; }
+    pip install --no-deps /opt/lstosa
 
     # ---- slim the image ----------------------------------------------------
-    rm -rf /opt/lstosa/.git
+    rm -rf /opt/lstosa
     micromamba clean -a -y
     pip cache purge || true
     find /opt/conda -name '__pycache__' -type d -prune -exec rm -rf {} + || true
@@ -133,8 +140,8 @@ PY
         singularity exec --bind /fefs/aswg,/fefs/onsite,/fefs/home \
             lstosa_v0.12.sif datasequence --help
 
-    Live-edit lstosa without rebuilding (bind your checkout over /opt/lstosa):
-        singularity exec --bind <host>/lstosa:/opt/lstosa,/fefs/aswg \
+    Live-edit lstosa without rebuilding (run your checkout via PYTHONPATH):
+        singularity exec --bind /fefs/aswg --env PYTHONPATH=<host>/lstosa/src \
             lstosa_v0.12.sif sequencer ...
 
     NOTE: This image does NOT include lstcam_calib (Cat-A calibration), which the
