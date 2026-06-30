@@ -71,6 +71,35 @@ def get_lstchain_version():
     return f"v{__version__}"
 
 
+def container_prefix():
+    """
+    Return the command prefix that runs job commands inside an Apptainer/Singularity
+    image, as configured in the ``[lstchain]`` section of the config file.
+
+    If ``apptainer_image`` is empty/unset this returns an empty list, so callers
+    keep running on the host environment exactly as before (no behaviour change).
+    When set, job commands are wrapped as
+    ``apptainer exec [--bind <apptainer_binds>] [<apptainer_options>] <image> <cmd> ...``
+    which avoids the per-job cost of activating a conda env on the shared filesystem.
+
+    Returns
+    -------
+    list of str
+    """
+    image = cfg.get("lstchain", "apptainer_image", fallback="").strip()
+    if not image:
+        return []
+    prefix = ["apptainer", "exec"]
+    binds = cfg.get("lstchain", "apptainer_binds", fallback="").strip()
+    if binds:
+        prefix += ["--bind", binds]
+    extra = cfg.get("lstchain", "apptainer_options", fallback="").strip()
+    if extra:
+        prefix += extra.split()
+    prefix.append(image)
+    return prefix
+
+
 def get_prod_id():
     """
     Get production ID from the configuration file if it is defined.

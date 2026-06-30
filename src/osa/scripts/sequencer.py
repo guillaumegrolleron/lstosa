@@ -19,11 +19,9 @@ from osa.veto import get_closed_list, get_veto_list
 from osa.utils.logging import myLogger
 
 warnings.filterwarnings(
-    "ignore",
-    message="pkg_resources is deprecated as an API.*",
-    category=UserWarning
+    "ignore", message="pkg_resources is deprecated as an API.*", category=UserWarning
 )
-from osa.job import ( # noqa: E402
+from osa.job import (  # noqa: E402
     set_queue_values,
     prepare_jobs,
     submit_jobs,
@@ -33,17 +31,17 @@ from osa.job import ( # noqa: E402
     run_squeue,
     are_all_jobs_correctly_finished,
 )
-from osa.nightsummary.extract import ( # noqa: E402
+from osa.nightsummary.extract import (  # noqa: E402
     build_sequences,
     extract_runs,
-    extract_sequences
+    extract_sequences,
 )
-from osa.nightsummary.nightsummary import run_summary_table # noqa: E402
-from osa.paths import analysis_path, destination_dir # noqa: E402
-from osa.report import start # noqa: E402
-from osa.utils.cliopts import sequencer_cli_parsing # noqa: E402
-from osa.utils.utils import is_day_closed, gettag, date_to_iso # noqa: E402
-from osa.scripts.gain_selection import GainSel_finished # noqa: E402
+from osa.nightsummary.nightsummary import run_summary_table  # noqa: E402
+from osa.paths import analysis_path, destination_dir  # noqa: E402
+from osa.report import start  # noqa: E402
+from osa.utils.cliopts import sequencer_cli_parsing  # noqa: E402
+from osa.utils.utils import is_day_closed, gettag, date_to_iso  # noqa: E402
+from osa.scripts.gain_selection import GainSel_finished  # noqa: E402
 
 __all__ = [
     "single_process",
@@ -125,7 +123,9 @@ def single_process(telescope):
 
     if not options.test and not options.simulate:
         if is_sequencer_running(options.date):
-            log.info(f"Sequencer is still running for date {date_to_iso(options.date)}. Try again later.")
+            log.info(
+                f"Sequencer is still running for date {date_to_iso(options.date)}. Try again later."
+            )
             sys.exit(0)
 
         if is_sequencer_completed(options.date) and not options.force_submit:
@@ -133,12 +133,14 @@ def single_process(telescope):
             sys.exit(0)
 
         elif timeout_in_sequencer(options.date) and not options.force_submit:
-            log.info(f"Some jobs of sequencer finished in TIMEOUT for date {date_to_iso(options.date)}."
-                " Please relaunch the affected sequences manually.")
+            log.info(
+                f"Some jobs of sequencer finished in TIMEOUT for date {date_to_iso(options.date)}."
+                " Please relaunch the affected sequences manually."
+            )
             sys.exit(0)
 
-    # Build the sequences
-    sequence_list = build_sequences(options.date)
+    # Build the sequences (optionally limited to a specific set of run IDs)
+    sequence_list = build_sequences(options.date, run_ids=options.run_ids)
 
     # Create job pilot scripts
     prepare_jobs(sequence_list)
@@ -235,7 +237,6 @@ def check_catB_status(seq):
     return catbstatus
 
 
-
 def get_status_for_sequence(sequence, data_level) -> int:
     """
     Get number of files produced for a given sequence and data level.
@@ -256,24 +257,28 @@ def get_status_for_sequence(sequence, data_level) -> int:
             files = list(directory.glob(f"dl1_LST-1*{sequence.run}*.h5"))
         except AttributeError:
             return 0
-        
+
     elif data_level == "DL2":
         try:
-            directory = destination_dir(concept="DL2", create_dir=False, dl2_prod_id=sequence.dl2_prod_id)
+            directory = destination_dir(
+                concept="DL2", create_dir=False, dl2_prod_id=sequence.dl2_prod_id
+            )
             files = list(directory.glob(f"dl2_LST-1*{sequence.run}*.h5"))
         except AttributeError:
             return 0
-        
+
     elif data_level == "DATACHECK":
         try:
             directory = options.directory / sequence.dl1_prod_id
-            alternative_directory = destination_dir(concept="DATACHECK", create_dir=False, dl1_prod_id=sequence.dl1_prod_id)
+            alternative_directory = destination_dir(
+                concept="DATACHECK", create_dir=False, dl1_prod_id=sequence.dl1_prod_id
+            )
             files = list(directory.glob(f"datacheck_dl1_LST-1*{sequence.run}*.h5"))
             files += list(alternative_directory.glob(f"datacheck_dl1_LST-1*{sequence.run}*.h5"))
-            
+
         except AttributeError:
             return 0
-        
+
     else:
         prefix = cfg.get("PATTERN", f"{data_level}PREFIX")
         suffix = cfg.get("PATTERN", f"{data_level}SUFFIX")
@@ -307,7 +312,7 @@ def report_sequences(sequence_list):
         "Exit",
     ]
     if options.tel_id in ["LST1", "LST2"]:
-        header.extend(("DL1%", "MUONS%", "CAT-B","DL1AB%", "DATACHECK%", "DL2%"))
+        header.extend(("DL1%", "MUONS%", "CAT-B", "DL1AB%", "DATACHECK%", "DL2%"))
     matrix = [header]
     for sequence in sequence_list:
         row_list = [
@@ -382,7 +387,7 @@ def is_sequencer_running(date: datetime.datetime) -> bool:
     sacct_info = get_sacct_output(sacct_output)
 
     for run in summary_table["run_id"]:
-        jobs_run = sacct_info[sacct_info["JobName"]==f"LST1_{run:05d}"]
+        jobs_run = sacct_info[sacct_info["JobName"] == f"LST1_{run:05d}"]
         queued_jobs = jobs_run[(jobs_run["State"] == "RUNNING") | (jobs_run["State"] == "PENDING")]
         if len(queued_jobs) != 0:
             return True
@@ -395,13 +400,18 @@ def is_sequencer_completed(date: datetime.datetime) -> bool:
     summary_table = run_summary_table(date)
     data_runs = summary_table[summary_table["run_type"] == "DATA"]
     run_list = extract_runs(data_runs)
-    sequence_list = extract_sequences(options.date, run_list)
+    # Respect --run-ids so the completeness check is scoped to the requested runs
+    # only. Without this, the whole night is built here and a single run with no
+    # dl1b config (e.g. a short run the tailcuts finder could not configure) would
+    # sys.exit the sequencer even when that run was never requested.
+    sequence_list = extract_sequences(options.date, run_list, run_ids=options.run_ids)
 
     if are_all_jobs_correctly_finished(sequence_list):
         return True
     else:
         log.info("Jobs did not correctly/yet finish")
         return False
+
 
 def timeout_in_sequencer(date: datetime.datetime) -> bool:
     """Check if any of the jobs launched by sequencer finished in timeout."""
@@ -411,10 +421,10 @@ def timeout_in_sequencer(date: datetime.datetime) -> bool:
     sacct_info = get_sacct_output(sacct_output)
 
     for run in data_runs["run_id"]:
-        jobs_run = sacct_info[sacct_info["JobName"]==f"LST1_{run:05d}"]
-        if len(jobs_run["JobID"].unique())>1:
+        jobs_run = sacct_info[sacct_info["JobName"] == f"LST1_{run:05d}"]
+        if len(jobs_run["JobID"].unique()) > 1:
             last_job_id = sorted(jobs_run["JobID"].unique())[-1]
-            jobs_run = sacct_info[sacct_info["JobID"]==last_job_id]
+            jobs_run = sacct_info[sacct_info["JobID"] == last_job_id]
         timeout_jobs = jobs_run[(jobs_run["State"] == "TIMEOUT")]
         if len(timeout_jobs) != 0:
             return True

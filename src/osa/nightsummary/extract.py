@@ -1,6 +1,5 @@
 """Extract subrun, run, sequence list and build corresponding objects."""
 
-
 import itertools
 import logging
 import sys
@@ -23,7 +22,12 @@ from osa.configs.datamodel import Sequence
 from osa.job import sequence_filenames
 from osa.nightsummary import database
 from osa.nightsummary.nightsummary import run_summary_table
-from osa.paths import sequence_calibration_files, get_run_date, get_dl1_prod_id_and_config, get_dl2_prod_id
+from osa.paths import (
+    sequence_calibration_files,
+    get_run_date,
+    get_dl1_prod_id_and_config,
+    get_dl2_prod_id,
+)
 from osa.utils.logging import myLogger
 from osa.utils.utils import date_to_iso, date_to_dir, get_RF_model
 
@@ -165,9 +169,10 @@ def extract_runs(summary_table):
                 run.source_dec = source_catalog.loc[run_id]["source_dec"]
 
         if len(source_catalog) == 0:
-            log.warning("No source information found in the database. The run catalog "
-                        f"for date {date_to_iso(options.date)} will be empty.")
-
+            log.warning(
+                "No source information found in the database. The run catalog "
+                f"for date {date_to_iso(options.date)} will be empty."
+            )
 
     elif database.db_available():
         run_table = Table(
@@ -179,9 +184,7 @@ def extract_runs(summary_table):
             if run.run > 0 and run.type == "DATA":
                 log.debug(f"Looking info in TCU DB for run {run.run}")
 
-                tcu_result = database.query(
-                    obs_id=run.run
-                )
+                tcu_result = database.query(obs_id=run.run)
 
                 if tcu_result is not None:
                     run.source_name = tcu_result.get("source_name")
@@ -203,8 +206,10 @@ def extract_runs(summary_table):
                     run_table.add_row(line)
 
         if len(run_table) == 0:
-            log.warning("No source information found in the database. The run catalog "
-                        f"for date {date_to_iso(options.date)} will be empty.")
+            log.warning(
+                "No source information found in the database. The run catalog "
+                f"for date {date_to_iso(options.date)} will be empty."
+            )
 
         # Save table to disk
         run_table.write(source_catalog_file, overwrite=True, delimiter=",")
@@ -214,7 +219,7 @@ def extract_runs(summary_table):
     return run_list
 
 
-def extract_sequences(date: datetime, run_obj_list: List[RunObj]) -> List[Sequence]:
+def extract_sequences(date: datetime, run_obj_list: List[RunObj], run_ids=None) -> List[Sequence]:
     """
     Create calibration and data sequences from run objects.
 
@@ -224,6 +229,9 @@ def extract_sequences(date: datetime, run_obj_list: List[RunObj]) -> List[Sequen
         Date of the runs to analyze
     run_obj_list : List[RunObj]
         List of run objects
+    run_ids : set[int] or None
+        If provided, only DATA runs whose integer ID is in this set are included.
+        The calibration sequence (PEDCALIB) is always included regardless.
 
     Returns
     -------
@@ -262,6 +270,9 @@ def extract_sequences(date: datetime, run_obj_list: List[RunObj]) -> List[Sequen
             )
 
         elif run.run in data_runs_to_process:
+            if run_ids is not None and run.run not in run_ids:
+                log.debug(f"Skipping run {run.run} (not in --run-ids list)")
+                continue
             sequence = SequenceData(run)
             # data sequences counted after the calibration sequence
             sequence.seq = data_runs_to_process.index(run.run) + 2
@@ -273,12 +284,12 @@ def extract_sequences(date: datetime, run_obj_list: List[RunObj]) -> List[Sequen
                 f"Data sequence {sequence.seq} from run {run.run} whose parent is "
                 f"{sequence.parent} (DRS4 {required_drs4_run} & Ped-Cal {required_pedcal_run})"
             )
-            if not options.no_dl1ab and sequence.type=="DATA":
+            if not options.no_dl1ab and sequence.type == "DATA":
                 dl1_prod_id, dl1b_config = get_dl1_prod_id_and_config(sequence.run)
                 sequence.dl1_prod_id = dl1_prod_id
                 sequence.dl1b_config = dl1b_config
 
-            if not options.no_dl2 and not options.no_dl1ab and sequence.type=="DATA":
+            if not options.no_dl2 and not options.no_dl1ab and sequence.type == "DATA":
                 sequence.dl2_prod_id = get_dl2_prod_id(sequence.run)
                 sequence.rf_model = get_RF_model(sequence.run)
 
@@ -293,12 +304,21 @@ def extract_sequences(date: datetime, run_obj_list: List[RunObj]) -> List[Sequen
     return sequence_list
 
 
-def build_sequences(date: datetime) -> List:
-    """Build the list of sequences to process from a given date."""
+def build_sequences(date: datetime, run_ids=None) -> List:
+    """
+    Build the list of sequences to process from a given date.
+
+    Parameters
+    ----------
+    date : datetime
+    run_ids : set[int] or None
+        If provided, only DATA runs whose integer ID is in this set are included.
+        The calibration sequence is always included regardless.
+    """
     summary_table = run_summary_table(date)
     run_list = extract_runs(summary_table)
     # modifies run_list by adding the seq and parent info into runs
-    return extract_sequences(date, run_list)
+    return extract_sequences(date, run_list, run_ids=run_ids)
 
 
 def get_source_list(date: datetime) -> dict:

@@ -1,0 +1,131 @@
+## ─────────────────────────────────────────────────────────────────────────────
+## Apptainer/Singularity definition file for the LST-1 on-site analysis (lstosa).
+##
+## Goal: bake lstchain + lstosa + their full dependency tree into a single SIF
+## image so SLURM jobs no longer pay the per-job cost of activating a conda env
+## living on the shared (network) filesystem. Inside the SIF the environment is a
+## read-optimised squashfs, so `import lstchain/ctapipe` is fast and local.
+##
+## Pinned to match the known-good production environment (PROD_ID v0.12):
+##     Python 3.11 · lstchain 0.12.2 · ctapipe 0.25.1 · ctapipe_io_lst 0.29.0
+##
+## ── Build ────────────────────────────────────────────────────────────────────
+##   cd /fefs/aswg/workspace/guillaume.grolleron/project/lstosa
+##   apptainer build lstosa_v0.12.sif lstosa.def
+##   # (use --fakeroot if you are not root:  apptainer build --fakeroot ...)
+##
+## ── Use ──────────────────────────────────────────────────────────────────────
+##   # one-off command
+##   apptainer exec lstosa_v0.12.sif sequencer --version
+##   apptainer exec lstosa_v0.12.sif lstchain_data_r0_to_dl1 --help
+##
+##   # bind the data trees the pipeline reads/writes (Apptainer auto-binds $HOME
+##   # and the CWD, but /fefs subtrees usually need to be explicit):
+##   apptainer exec \
+##       --bind /fefs/aswg,/fefs/onsite,/fefs/home \
+##       lstosa_v0.12.sif datasequence ...
+##
+##   # ACTIVE DEVELOPMENT of lstosa: bind your host checkout over /opt/lstosa so
+##   # your edits are live without rebuilding (the image installed it editable):
+##   apptainer exec \
+##       --bind /fefs/aswg/workspace/guillaume.grolleron/project/lstosa:/opt/lstosa \
+##       --bind /fefs/aswg,/fefs/onsite,/fefs/home \
+##       lstosa_v0.12.sif sequencer ...
+## ─────────────────────────────────────────────────────────────────────────────
+
+Bootstrap: docker
+From: mambaorg/micromamba:1.5.8
+
+%files
+    # Copy the lstosa source into the image. Absolute host path so the build does
+    # NOT depend on the CWD you launch `singularity build` from; this copies the
+    # repo dir into /opt, giving /opt/lstosa/pyproject.toml. Installed editable so
+    # a runtime bind-mount over /opt/lstosa picks up live edits.
+    /fefs/aswg/workspace/guillaume.grolleron/project/lstosa /opt
+
+%post
+    set -eux
+    export MAMBA_ROOT_PREFIX=/opt/conda
+    export PIP_NO_CACHE_DIR=1
+
+    # ---- base interpreter + build tools ------------------------------------
+    # c-/cxx-compiler pull a conda-forge gcc/g++ toolchain and export CC/CXX on
+    # activation, so source builds (e.g. gammapy's Cython fit_statistics_cython
+    # extension) that lstchain drags in don't fail with "gcc: No such file".
+    micromamba install -y -n base -c conda-forge \
+        python=3.11 pip git c-compiler cxx-compiler
+    eval "$(micromamba shell hook --shell posix)"
+    micromamba activate base
+
+    # ---- lstchain (pulls the matched ctapipe / ctapipe_io_lst / gammapy etc.)
+    # Pin the exact production version so the image reproduces v0.12 outputs.
+    pip install "lstchain==0.12.2"
+
+    # ---- lstosa itself (editable; its pyproject deps fill in pydot, prov,
+    #      pymongo, tenacity, click, psutil, toml, pyyaml, ...) ---------------
+    pip install -e /opt/lstosa
+
+    # ---- slim the image ----------------------------------------------------
+    rm -rf /opt/lstosa/.git
+    micromamba clean -a -y
+    pip cache purge || true
+    find /opt/conda -name '__pycache__' -type d -prune -exec rm -rf {} + || true
+
+    # quick import smoke-test (fails the build early if the env is broken)
+    python - <<'PY'
+import lstchain, ctapipe, ctapipe_io_lst, osa
+print("lstchain", lstchain.__version__)
+print("ctapipe", ctapipe.__version__)
+print("ctapipe_io_lst", ctapipe_io_lst.__version__)
+print("osa OK")
+PY
+
+%environment
+    # Flat env: putting /opt/conda/bin on PATH "activates" it (python + all the
+    # pip-installed console scripts: sequencer, datasequence, lstchain_*, ...).
+    export MAMBA_ROOT_PREFIX=/opt/conda
+    export PATH=/opt/conda/bin:$PATH
+    export LANG=C.UTF-8
+    export LC_ALL=C.UTF-8
+    # Keep matplotlib/astropy/ctapipe caches off the network FS unless the caller
+    # overrides them (the lstosa config also sets these per-run).
+    export MPLCONFIGDIR=${MPLCONFIGDIR:-/tmp/mpl-$USER}
+
+%runscript
+    # `apptainer run lstosa_v0.12.sif <cmd> <args>` executes inside the env.
+    exec "$@"
+
+%test
+    set -e
+    export PATH=/opt/conda/bin:$PATH
+    python -c "import lstchain, ctapipe, ctapipe_io_lst, osa; print('container OK', lstchain.__version__)"
+    sequencer --help >/dev/null && echo "sequencer entrypoint OK"
+
+%labels
+    Maintainer grolleron@lapp.in2p3.fr
+    Component lstosa
+    Lstchain 0.12.2
+    Ctapipe 0.25.1
+    Python 3.11
+    Description LST-1 on-site analysis (lstosa) pipeline image for DL1 reprocessing (PROD_ID v0.12)
+
+%help
+    Apptainer image for the LST-1 on-site analysis pipeline (lstosa) pinned to the
+    v0.12 production stack (lstchain 0.12.2 / ctapipe 0.25.1). Built to replace the
+    network-filesystem conda environment so SLURM jobs start fast.
+
+    Build:
+        cd <lstosa repo root>
+        apptainer build lstosa_v0.12.sif lstosa.def
+
+    Run a pipeline command (bind the data trees it touches):
+        apptainer exec --bind /fefs/aswg,/fefs/onsite,/fefs/home \
+            lstosa_v0.12.sif datasequence --help
+
+    Live-edit lstosa without rebuilding (bind your checkout over /opt/lstosa):
+        apptainer exec --bind <host>/lstosa:/opt/lstosa,/fefs/aswg \
+            lstosa_v0.12.sif sequencer ...
+
+    NOTE: This image does NOT include lstcam_calib (Cat-A calibration), which the
+    reprocessing skips via --no-calib/--no-gainsel. If you ever need Cat-A, build a
+    second image from environment-lstcam.yml (pip install lstcam_calib).

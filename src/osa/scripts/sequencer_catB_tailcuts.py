@@ -1,5 +1,6 @@
 import glob
 import re
+import shlex
 import argparse
 import logging
 from pathlib import Path
@@ -12,12 +13,15 @@ from osa.nightsummary.extract import get_last_pedcalib
 from osa.utils.cliopts import valid_date, set_default_date_if_needed
 from osa.utils.logging import myLogger
 from osa.job import run_sacct, get_sacct_output
-from osa.utils.utils import date_to_dir, get_calib_filters, get_lstchain_version
+from osa.utils.utils import date_to_dir, get_calib_filters, get_lstchain_version, container_prefix
+from lstchain.onsite import find_systematics_correction_file
+
 from osa.paths import (
     catB_closed_file_exists,
     catB_calibration_file_exists,
     analysis_path,
-    get_major_version
+    get_major_version,
+    search_calibration_files,
 )
 
 log = myLogger(logging.getLogger())
@@ -61,6 +65,14 @@ parser.add_argument(
     action="store_true",
     default=False,
     help="Overwrite the Cat-B calibration files if they already exist.",
+)
+parser.add_argument(
+    "--run-ids",
+    nargs="+",
+    type=int,
+    default=None,
+    metavar="RUN_ID",
+    help="Only process these DATA run IDs (space-separated integers).",
 )
 parser.add_argument(
     "tel_id",
@@ -146,33 +158,57 @@ def launch_catB_calibration(run_id: int):
             env_command = f"conda run -n lstcam-env {command}"
         else:
             env_command = command
-        options.filters = get_calib_filters(run_id) 
-        base_dir = Path(cfg.get(options.tel_id, "BASE")).resolve()
+        options.filters = get_calib_filters(run_id)
+        catB_base = cfg.get(options.tel_id, "CAT_B_BASE_DIR", fallback=None)
+        base_dir = Path(catB_base).resolve() if catB_base else Path(cfg.get(options.tel_id, "BASE")).resolve()
+        original_base_dir = Path(cfg.get(options.tel_id, "BASE")).resolve()
         r0_dir = Path(cfg.get(options.tel_id, "R0_DIR")).resolve()
         log_dir = Path(options.directory) / "log"
         catA_calib_run = get_last_pedcalib(options.date)
         slurm_account = cfg.get("SLURM", "ACCOUNT")
         lstchain_version = get_major_version(get_lstchain_version())
         analysis_dir = cfg.get("LST1", "ANALYSIS_DIR")
-        cmd = ["sbatch", f"--account={slurm_account}", "--parsable",
+        flat_date = date_to_dir(options.date)
+
+        # Resolve Cat-A calibration and systematics files using the original base
+        # dir so they are found even when CAT_B_BASE_DIR differs from BASE.
+        catA_files = search_calibration_files(catA_calib_run, options.prod_id)
+        if not catA_files:
+            log.error(f"No Cat-A calibration file found for run {catA_calib_run}. Cannot launch Cat-B.")
+            return
+        catA_calib_file = catA_files[-1]
+        systematics_file = find_systematics_correction_file("pro", flat_date, base_dir=original_base_dir)
+
+        sbatch_opts = ["sbatch", f"--account={slurm_account}", "--parsable",
             "-o", f"{log_dir}/catB_calibration_{run_id:05d}_%j.out",
             "-e", f"{log_dir}/catB_calibration_{run_id:05d}_%j.err",
-            env_command,
-            f"-r {run_id:05d}",
-            f"--catA_calibration_run={catA_calib_run}",
-            "-b", base_dir,
+        ]
+        inner = [env_command,
+            "-r", str(run_id),
+            "-b", str(base_dir),
+            f"--cat_A_calibration_file={catA_calib_file}",
+            f"--systematics_file={systematics_file}",
             f"--r0-dir={r0_dir}",
             f"--filters={options.filters}",
         ]
-        
+
         if command=="onsite_create_cat_B_calibration_file":
-            cmd.append(f"--interleaved-dir={analysis_dir}")
+            inner.append(f"--interleaved-dir={analysis_dir}")
         elif command=="lstcam_calib_onsite_create_cat_B_calibration_file":
-            cmd.append(f"--dl1-dir={analysis_dir}")
-            cmd.append(f"--lstchain-version={lstchain_version[1:]}")
+            inner.append(f"--dl1-dir={analysis_dir}")
+            inner.append(f"--lstchain-version={lstchain_version[1:]}")
 
         if options.overwrite_catB:
-            cmd.append("--yes")
+            inner.append("--yes")
+
+        # Optionally run the command inside an apptainer image (see [lstchain]
+        # apptainer_image). sbatch needs a script, so the container call is passed
+        # via --wrap. Skipped when the Cat-B lstcam-env is used (not in the image).
+        prefix = container_prefix()
+        if prefix and not cfg.getboolean("lstchain", "use_lstcam_env_for_CatB_calib"):
+            cmd = sbatch_opts + ["--wrap", shlex.join(prefix + inner)]
+        else:
+            cmd = sbatch_opts + inner
 
         if not options.simulate:
             job = sp.run(cmd, encoding="utf-8", capture_output=True, text=True, check=True)
@@ -194,15 +230,20 @@ def launch_tailcuts_finder(run_id: int):
     output_dir = Path(cfg.get(options.tel_id, "TAILCUTS_FINDER_DIR"))
     log_dir = Path(options.directory) / "log"
     log_file = log_dir / f"tailcuts_finder_{run_id:05d}_%j.log"
-    cmd = [
-        "sbatch", "--parsable",
-        f"--account={slurm_account}",
-        "-o", log_file,
+    sbatch_opts = ["sbatch", "--parsable", f"--account={slurm_account}", "-o", log_file]
+    inner = [
         command,
         f"--input-dir={input_dir}",
         f"--run={run_id}",
         f"--output-dir={output_dir}",
     ]
+    # Optionally run lstchain_find_tailcuts inside an apptainer image via --wrap
+    # (see [lstchain] apptainer_image); unchanged host submission when unset.
+    prefix = container_prefix()
+    if prefix:
+        cmd = sbatch_opts + ["--wrap", shlex.join(prefix + inner)]
+    else:
+        cmd = sbatch_opts + inner
     if not options.simulate:
         job = sp.run(cmd, encoding="utf-8", capture_output=True, text=True, check=True)
         job_id = job.stdout.strip()
@@ -234,6 +275,7 @@ def main():
     options.date = set_default_date_if_needed()
     options.configfile = opts.config.resolve()
     options.directory = analysis_path(options.tel_id)
+    run_ids_filter = set(opts.run_ids) if opts.run_ids is not None else None
 
     if opts.verbose:
         log.setLevel(logging.DEBUG)
@@ -244,13 +286,26 @@ def main():
     run_summary = Table.read(run_summary_dir / f"RunSummary_{date_to_dir(options.date)}.ecsv")
     data_runs = run_summary[run_summary["run_type"]=="DATA"]
     for run_id in data_runs["run_id"]:
+        if run_ids_filter is not None and run_id not in run_ids_filter:
+            log.debug(f"Skipping run {run_id:05d} (not in --run-ids list)")
+            continue
         # first check if the dl1a files are produced
         if not r0_to_dl1_step_finished_for_run(run_id):
             log.info(f"The r0_to_dl1 step did not finish yet for run {run_id:05d}. Please try again later.")
         else:
             # launch catB calibration and tailcut finder in parallel
             if cfg.getboolean("lstchain", "apply_catB_calibration") and not catB_closed_file_exists(run_id):
-                launch_catB_calibration(run_id)
+                if catB_calibration_file_exists(run_id):
+                    # Calibration file already produced (e.g. by a previous run) but
+                    # the .closed marker is missing — just create it.
+                    catB_closed_file = Path(options.directory) / f"catB_{run_id:05d}.closed"
+                    catB_closed_file.touch()
+                    log.info(
+                        f"Cat-B calibration file already exists for run {run_id:05d}. "
+                        f"Created missing .closed file: {catB_closed_file}"
+                    )
+                else:
+                    launch_catB_calibration(run_id)
             if not cfg.getboolean("lstchain", "apply_standard_dl1b_config"):
                 if tailcuts_config_file_exists(run_id) and not options.overwrite_tailcuts:
                     log.debug(

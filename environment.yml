@@ -4,7 +4,7 @@ channels:
 dependencies:
   # core dependencies
   - python=3.11
-  - numpy>=1.23,<2.0
+  - numpy>=1.23,<=2.0
   - pip
   - astropy>=6.1,<8
   - ctapipe>=0.25.0
@@ -25,8 +25,8 @@ dependencies:
   - ctaplot~=0.6.4
   - pyirf~=0.12.0
   - tenacity
-  - pip:
-      - lstchain>=0.11.0
+  - pandas<3.0
+  #- lstchain>=0.12.0
   # dev dependencies
   - pytest
   - pytest-cov

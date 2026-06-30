@@ -104,6 +104,14 @@ def closer_argparser():
         default=False,
         help="Do not produce DL2 files (default False)",
     )
+    parser.add_argument(
+        "--run-ids",
+        nargs="+",
+        type=int,
+        default=None,
+        metavar="RUN_ID",
+        help="Only close these DATA run IDs (space-separated integers).",
+    )
     parser.add_argument("tel_id", choices=["ST", "LST1", "LST2"])
 
     return parser
@@ -118,6 +126,7 @@ def closercliparsing():
     options.seqtoclose = opts.seqtoclose
     options.no_dl2 = opts.no_dl2
     options.noninteractive = opts.noninteractive
+    options.run_ids = set(opts.run_ids) if opts.run_ids is not None else None
 
     log.debug(f"the options are {opts}")
 
@@ -208,13 +217,10 @@ def data_sequence_argparser():
         "--dl1b-config",
         type=Path,
         default=None,
-        help="Configuration file for the production of DL1b files"
+        help="Configuration file for the production of DL1b files",
     )
     parser.add_argument(
-        "--dl1-prod-id",
-        type=str,
-        default=None,
-        help="Production id of the DL1b files"
+        "--dl1-prod-id", type=str, default=None, help="Production id of the DL1b files"
     )
     parser.add_argument("run_number", help="Number of the run to be processed")
     parser.add_argument("tel_id", choices=["ST", "LST1", "LST2"])
@@ -292,7 +298,16 @@ def sequencer_argparser():
         "--force-submit",
         action="store_true",
         default=False,
-        help="Force sequencer to submit jobs"
+        help="Force sequencer to submit jobs",
+    )
+    parser.add_argument(
+        "--run-ids",
+        nargs="+",
+        type=int,
+        default=None,
+        metavar="RUN_ID",
+        help="Only process these DATA run IDs (space-separated integers). "
+        "The calibration sequence is always included as a dependency.",
     )
     parser.add_argument(
         "tel_id",
@@ -314,6 +329,7 @@ def sequencer_cli_parsing():
     options.no_dl1ab = opts.no_dl1ab
     options.no_gainsel = opts.no_gainsel
     options.force_submit = opts.force_submit
+    options.run_ids = set(opts.run_ids) if opts.run_ids is not None else None
 
     log.debug(f"the options are {opts}")
 
@@ -359,7 +375,9 @@ def provprocess_argparser():
     )
     parser.add_argument("pedcal_run_id", help="Number of the used pedcal used in the calibration")
     parser.add_argument("run", help="Number of the run whose provenance is to be extracted")
-    parser.add_argument("date", action="store", type=valid_date, help="Date (YYYY-MM-DD) of the start of the night")
+    parser.add_argument(
+        "date", action="store", type=valid_date, help="Date (YYYY-MM-DD) of the start of the night"
+    )
     parser.add_argument("prod_id", action="store", type=str, help="Production ID")
 
     return parser
@@ -411,12 +429,12 @@ def simproc_argparser():
         help="append provenance capture to existing prov.log file",
     )
     parser.add_argument(
-         "-d",
-         "--date",
-         action="store",
-         type=valid_date,
-         dest="date",
-         help="observation ending date YYYY-MM-DD [default today]",
+        "-d",
+        "--date",
+        action="store",
+        type=valid_date,
+        dest="date",
+        help="observation ending date YYYY-MM-DD [default today]",
     )
     parser.add_argument("tel_id", choices=["ST", "LST1", "LST2"])
 
@@ -508,7 +526,21 @@ def autocloser_cli_parser():
         default=False,
         help="Do not check if the gain selection finished correctly (default False)",
     )
+    parser.add_argument(
+        "--no-calib",
+        action="store_true",
+        default=False,
+        help="Skip calibration sequence in the sequencer simulation (use when Cat-A calib was not reprocessed)",
+    )
     parser.add_argument("-r", "--runwise", action="store_true", help="Close the day run-wise.")
     parser.add_argument("-l", "--log", type=Path, default=None, help="Write log to a file.")
+    parser.add_argument(
+        "--run-ids",
+        nargs="+",
+        type=int,
+        default=None,
+        metavar="RUN_ID",
+        help="Only simulate and close these DATA run IDs (space-separated integers).",
+    )
     parser.add_argument("tel_id", type=str, choices=["LST1"])
     return parser

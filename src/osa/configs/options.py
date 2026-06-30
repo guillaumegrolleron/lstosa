@@ -31,3 +31,4 @@ no_submit = False
 seqtoclose = None
 run = None
 filters = None
+run_ids = None  # list[int] of run IDs to reprocess; None means all runs

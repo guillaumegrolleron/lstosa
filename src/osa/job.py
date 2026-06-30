@@ -30,6 +30,7 @@ from osa.utils.utils import (
     time_to_seconds,
     stringify,
     date_to_iso,
+    container_prefix,
 )
 
 log = myLogger(logging.getLogger(__name__))
@@ -432,7 +433,9 @@ def data_sequence_job_template(sequence):
 
     flat_date = date_to_dir(options.date)
 
-    commandargs = ["datasequence"]
+    # container_prefix() prepends `apptainer exec <image>` when an image is
+    # configured in [lstchain]; empty list otherwise (runs on the host env).
+    commandargs = container_prefix() + ["datasequence"]
 
     if options.verbose:
         commandargs.append("-v")
@@ -519,9 +522,10 @@ def calibration_sequence_job_template(sequence):
     job_header = job_header_template(sequence)
 
     if cfg.getboolean("lstchain", "use_lstcam_env_for_CatA_calib"):
+        # lstcam-env lives in conda, not in the apptainer image → no container wrap.
         commandargs = ["conda", "run", "-n", "lstcam-env", "calibration_pipeline"]
     else:
-        commandargs = ["calibration_pipeline"]
+        commandargs = container_prefix() + ["calibration_pipeline"]
 
     if options.verbose:
         commandargs.append("-v")

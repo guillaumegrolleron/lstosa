@@ -3,6 +3,7 @@
 import logging
 import subprocess as sp
 import time
+from collections import defaultdict
 from pathlib import Path
 
 import click
@@ -22,19 +23,20 @@ def number_of_pending_jobs():
 
 
 def run_script(
-    script: str, 
-    date, 
-    config: Path, 
-    no_dl2: bool, 
-    no_gainsel: bool, 
-    no_calib: bool, 
-    no_dl1ab: bool, 
-    simulate: bool, 
+    script: str,
+    date,
+    config: Path,
+    no_dl2: bool,
+    no_gainsel: bool,
+    no_calib: bool,
+    no_dl1ab: bool,
+    simulate: bool,
     force: bool,
     overwrite_tailcuts: bool,
     overwrite_catb: bool,
+    run_ids=None,
 ):
-    """Run the sequencer for a given date."""
+    """Run the sequencer for a given date, optionally restricted to specific run IDs."""
     osa_config = Path(config).resolve()
 
     cmd = [script, "--config", str(osa_config), "--date", date]
@@ -59,10 +61,14 @@ def run_script(
 
     if overwrite_tailcuts:
         cmd.append("--overwrite-tailcuts")
-    
+
     if overwrite_catb:
         cmd.append("--overwrite-catB")
-        
+
+    if run_ids:
+        cmd.append("--run-ids")
+        cmd.extend(str(r) for r in sorted(run_ids))
+
     # Append the telescope to the command in the last place
     cmd.append("LST1")
 
@@ -84,6 +90,36 @@ def get_list_of_dates(dates_file):
     return list_of_dates
 
 
+def get_runs_per_date(runs_file) -> dict:
+    """
+    Read a file mapping dates to run IDs and return a dict {date: set[int]}.
+
+    Expected format — one entry per line, either:
+      YYYY-MM-DD                         (all runs for that date)
+      YYYY-MM-DD RUN1 RUN2 ...           (space-separated run IDs after the date)
+      YYYY-MM-DD RUN1,RUN2,...           (comma-separated run IDs after the date)
+
+    Lines starting with '#' are ignored.
+    """
+    runs_per_date: dict[str, set] = defaultdict(set)
+    with open(runs_file) as fh:
+        for raw_line in fh:
+            line = raw_line.strip()
+            if not line or line.startswith("#"):
+                continue
+            # Replace commas with spaces so both separators work uniformly
+            parts = line.replace(",", " ").split()
+            date = parts[0]
+            if len(parts) == 1:
+                # No run IDs specified → process all runs for this date (None sentinel)
+                runs_per_date[date]  # creates the key with an empty set
+            else:
+                for token in parts[1:]:
+                    runs_per_date[date].add(int(token))
+    # Convert empty sets back to None so downstream code knows "all runs"
+    return {date: (ids if ids else None) for date, ids in runs_per_date.items()}
+
+
 @click.command()
 @click.option("--no-dl2", is_flag=True, help="Do not run the DL2 step.")
 @click.option("--no-gainsel", is_flag=True, help="Do not require gain selection to be finished.")
@@ -91,8 +127,16 @@ def get_list_of_dates(dates_file):
 @click.option("--no-dl1ab", is_flag=True, help="Do not run the DL1AB step.")
 @click.option("-s", "--simulate", is_flag=True, help="Activate simulation mode.")
 @click.option("-f", "--force", is_flag=True, help="Force the autocloser to close the day.")
-@click.option("--overwrite-tailcuts", is_flag=True, help="Overwrite the tailcuts config file if it already exists.")
-@click.option("--overwrite-catB", is_flag=True, help="Overwrite the Cat-B calibration files if they already exist.")
+@click.option(
+    "--overwrite-tailcuts",
+    is_flag=True,
+    help="Overwrite the tailcuts config file if it already exists.",
+)
+@click.option(
+    "--overwrite-catB",
+    is_flag=True,
+    help="Overwrite the Cat-B calibration files if they already exist.",
+)
 @click.option(
     "-c",
     "--config",
@@ -101,7 +145,10 @@ def get_list_of_dates(dates_file):
     help="Path to the OSA config file.",
 )
 @click.argument(
-    "script", type=click.Choice(["sequencer", "closer", "copy_datacheck", "autocloser", "sequencer_catB_tailcuts"])
+    "script",
+    type=click.Choice(
+        ["sequencer", "closer", "copy_datacheck", "autocloser", "sequencer_catB_tailcuts"]
+    ),
 )
 @click.argument("dates-file", type=click.Path(exists=True))
 def main(
@@ -116,21 +163,42 @@ def main(
     force: bool = False,
     overwrite_tailcuts: bool = False,
     overwrite_catb: bool = False,
-    ):
+):
     """
-    Loop over the dates listed in the input file and launch the script for each of them.
-    The input file should list the dates in the format YYYY-MM-DD one date per line.
+    Loop over the dates (and optionally run IDs) listed in the input file and
+    launch SCRIPT for each of them.
+
+    \b
+    The input file supports two formats:
+
+      Simple dates file (one date per line):
+        2024-01-15
+        2024-01-16
+
+      Runs file (date followed by run IDs):
+        2024-01-15 3456 3457 3458
+        2024-01-16 3501,3502
+        2024-01-17              # no run IDs = all runs for that date
+
+    When run IDs are present the sequencer is called with --run-ids so that
+    only those specific DATA runs are submitted (the calibration sequence is
+    always included as a SLURM dependency).
     """
     logging.basicConfig(level=logging.INFO)
 
-    list_of_dates = get_list_of_dates(dates_file)
+    runs_per_date = get_runs_per_date(dates_file)
 
     # Check slurm queue status
     check_job_status_and_wait()
 
-    for date in list_of_dates:
+    for date, run_ids in runs_per_date.items():
         # Avoid running jobs while it is still night time
         wait_for_daytime()
+
+        if run_ids:
+            log.info(f"Processing date {date} with run IDs: {sorted(run_ids)}")
+        else:
+            log.info(f"Processing date {date} (all runs)")
 
         run_script(
             script,
@@ -144,6 +212,7 @@ def main(
             force,
             overwrite_tailcuts,
             overwrite_catb,
+            run_ids=run_ids,
         )
         log.info("Waiting 1 minute to launch the process for the next date...\n")
         time.sleep(60)

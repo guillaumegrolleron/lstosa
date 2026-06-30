@@ -178,17 +178,44 @@ def calibration_file_exists(run_id: int, prod_id: str) -> bool:
     return len(files) != 0
 
 
+def _parse_version_tuple(version_str: str) -> tuple:
+    """Parse a version string like 'v0.10.12' into a sortable tuple (0, 10, 12)."""
+    m = re.match(r'v?(\d+)\.(\d+)(?:\.(\d+))?', version_str)
+    if m:
+        return tuple(int(x) if x is not None else 0 for x in m.groups())
+    return (0, 0, 0)
+
+
+def get_min_compatible_calib_version(prod_id: str) -> tuple:
+    """
+    Return the minimum lstcam_calib version compatible with the given lstchain prod_id
+    as a (major, minor, patch) tuple. For lstchain vX.Y, compatible calibration versions
+    are those with version >= vX.(Y-2), so that e.g. lstchain v0.12 accepts calib >= v0.10.
+    """
+    m = re.match(r'v?(\d+)\.(\d+)', prod_id)
+    if not m:
+        return (0, 0, 0)
+    major, minor = int(m.group(1)), int(m.group(2))
+    return (major, max(0, minor - 2), 0)
+
+
 def search_drs4_files(run_id: int, prod_id: str) -> list:
     """
-    Find DRS4 baseline correction files corresponding to a run ID
-    and major lstchain production version
+    Find DRS4 baseline correction files for a run. Searches all calibration version
+    subdirectories that are >= the minimum compatible version for the given prod_id
+    and returns them sorted by version (latest last).
     """
     date = utils.date_to_dir(get_run_date(run_id))
-    version = get_major_version(prod_id)
     drs4_dir = DRS4_PEDESTAL_BASEDIR / date
-    return sorted(
-        drs4_dir.glob(f"{version}*/drs4_pedestal.Run{run_id:05d}.0000.h5")
-    )
+    min_version = get_min_compatible_calib_version(prod_id)
+    all_files = []
+    if drs4_dir.exists():
+        for version_dir in drs4_dir.iterdir():
+            if not version_dir.is_dir() or version_dir.name == "pro":
+                continue
+            if _parse_version_tuple(version_dir.name) >= min_version:
+                all_files.extend(version_dir.glob(f"drs4_pedestal.Run{run_id:05d}.0000.h5"))
+    return sorted(all_files, key=lambda p: _parse_version_tuple(p.parent.name))
 
 
 def get_major_version(prod_id):
@@ -202,13 +229,23 @@ def get_major_version(prod_id):
 
 def search_calibration_files(run_id: int, prod_id: str) -> list:
     """
-    Search charge calibration files corresponding to a run ID and major lstchain production version
+    Search charge calibration files for a run. Searches all calibration version
+    subdirectories that are >= the minimum compatible version for the given prod_id
+    and returns them sorted by version (latest last).
     """
     date = utils.date_to_dir(get_run_date(run_id))
-    version = get_major_version(prod_id)
-    return sorted(
-        (CALIB_BASEDIR / date).glob(f"{version}*/calibration_filters_*.Run{run_id:05d}.0000.h5")
-    )
+    calib_dir = CALIB_BASEDIR / date
+    min_version = get_min_compatible_calib_version(prod_id)
+    all_files = []
+    if calib_dir.exists():
+        for version_dir in calib_dir.iterdir():
+            if not version_dir.is_dir() or version_dir.name == "pro":
+                continue
+            if _parse_version_tuple(version_dir.name) >= min_version:
+                all_files.extend(
+                    version_dir.glob(f"calibration_filters_*.Run{run_id:05d}.0000.h5")
+                )
+    return sorted(all_files, key=lambda p: _parse_version_tuple(p.parent.name))
 
 
 def get_drive_file(date: str) -> Path:
@@ -452,7 +489,7 @@ def create_muons_symlinks():
     for input_file in muons_file_list:
         output_file = output_dir / input_file.name
         if not output_file.is_symlink():
-            print(f"input file exists: {input_file.exists()}")
+            log.debug(f"input file exists: {input_file.exists()}")
             output_file.symlink_to(input_file.resolve())
 
 
@@ -518,7 +555,8 @@ def get_dl1_prod_id_and_config(run_id: int) -> str:
         if not dl1b_config_file.exists()  and not options.simulate:
             log.error(
                 f"The dl1b config file was not created yet for run {run_id:05d}. "
-                "Please try again later."
+                "Please try again later.",
+                stack_info=True
             )
             sys.exit(1) 
         else: 

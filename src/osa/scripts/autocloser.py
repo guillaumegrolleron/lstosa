@@ -42,6 +42,8 @@ class Telescope:
         ignore_cronlock: bool = False,
         test: bool = False,
         no_gainsel: bool = False,
+        no_calib: bool = False,
+        run_ids: list = None,
     ):
         """
         Parameters
@@ -83,7 +85,7 @@ class Telescope:
         if not self.lock_automatic_sequencer() and not ignore_cronlock:
             log.warning(f"{self.telescope} already locked! Ignoring {self.telescope}")
             sys.exit(0)
-        if not self.simulate_sequencer(date, config_file, test, no_gainsel):
+        if not self.simulate_sequencer(date, config_file, test, no_gainsel, no_calib, run_ids):
             log.warning(
                 f"Simulation of the sequencer failed "
                 f"for {self.telescope}! Ignoring {self.telescope}"
@@ -122,22 +124,25 @@ class Telescope:
         self.locked = True
         return True
 
-    def simulate_sequencer(self, date: str, config_file: Path, test: bool, no_gainsel: bool):
+    def simulate_sequencer(self, date: str, config_file: Path, test: bool, no_gainsel: bool, no_calib: bool = False, run_ids: list = None):
         """Launch the sequencer in simulation mode."""
         if test:
             self.read_file()
         else:
             sequencer_cmd = [
                 "sequencer",
-                "-s",
                 "-c",
                 str(config_file),
                 "-d",
                 date,
-                self.telescope,
             ]
             if no_gainsel:
                 sequencer_cmd.insert(1, "--no-gainsel")
+            if no_calib:
+                sequencer_cmd.insert(1, "--no-calib")
+            if run_ids:
+                sequencer_cmd += ["--run-ids"] + [str(r) for r in run_ids]
+            sequencer_cmd.extend(["-s", self.telescope])
 
             log.debug(f"Executing {' '.join(sequencer_cmd)}")
             sequencer = subprocess.Popen(
@@ -192,6 +197,7 @@ class Telescope:
         simulate: bool = False,
         test: bool = False,
         verbose: bool = False,
+        run_ids: list = None,
     ):
         """Launch the closer command."""
         log.info("Closing...")
@@ -203,7 +209,6 @@ class Telescope:
             "-y",
             "-d",
             date,
-            self.telescope,
         ]
 
         if simulate:
@@ -215,17 +220,17 @@ class Telescope:
         if verbose:
             closer_cmd.insert(1, "-v")
 
+        if run_ids:
+            closer_cmd += ["--run-ids"] + [str(r) for r in run_ids]
+        closer_cmd += ["-y", self.telescope]
         if test:
             self.closed = True
             return True
 
         log.debug(f"Executing {' '.join(closer_cmd)}")
-        closer = subprocess.Popen(
-            closer_cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, shell=False
-        )
-        stdout, _ = closer.communicate()
+        closer = subprocess.run(closer_cmd, shell=False)
         if closer.returncode != 0:
-            log.warning(f"closer returned error code {closer.returncode}! See output: {stdout}")
+            log.warning(f"closer returned error code {closer.returncode}!")
             return False
         self.closed = True
         return True
@@ -352,10 +357,9 @@ class Sequence:
             return True
 
         log.debug(f"Executing {' '.join(closer_cmd)}")
-        closer = subprocess.Popen(closer_cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT)
-        stdout, _ = closer.communicate()
+        closer = subprocess.run(closer_cmd, shell=False)
         if closer.returncode != 0:
-            log.warning(f"closer returned error code {closer.returncode}! See output: {stdout}")
+            log.warning(f"closer returned error code {closer.returncode}!")
             return False
 
         self.closed = True
@@ -372,7 +376,29 @@ def understand_sequence(seq, no_dl2: bool):
         seq.readyToClose = True
         return True
 
+    # After the closer moves DL1 files to DL1/, the sequencer can show Action=Check
+    # with 0% for all products (sacct has no records for old jobs). Check the .closed
+    # marker file on disk directly — it is the authoritative source of truth.
+    closed_marker = (
+        analysis_path(seq.dict_sequence["Tel"])
+        / f"sequence_{seq.dict_sequence['Tel']}_{seq.dict_sequence['Run']}.closed"
+    )
+    if closed_marker.exists():
+        seq.understood = True
+        log.info("Sequence .closed marker file exists (files already registered in DL1/)")
+        seq.closed = True
+        seq.readyToClose = True
+        return True
+
     if not seq.is_complete():
+        # Jobs may have finished and been purged from the SLURM queue (State shows
+        # as "None"). Treat DATA sequences as complete when all expected products
+        # are at 100% — this is the normal outcome for reprocessed runs.
+        if seq.dict_sequence.get("State") == "None" and seq.is_100(no_dl2=no_dl2):
+            seq.understood = True
+            log.info("All products at 100% (job no longer in SLURM queue)")
+            seq.readyToClose = True
+            return True
         log.info("Is not completed yet")
         return True
 
@@ -452,7 +478,15 @@ def main():
     # create telescope and sequence objects
     log.info("Simulating sequencer...")
 
-    telescope = Telescope(args.tel_id, date, args.config, no_gainsel=args.no_gainsel)
+    telescope = Telescope(
+        args.tel_id,
+        date,
+        args.config,
+        ignore_cronlock=args.ignore_cronlock,
+        no_gainsel=args.no_gainsel,
+        no_calib=args.no_calib,
+        run_ids=args.run_ids,
+    )
 
     log.info(f"Processing {args.tel_id}...")
 
@@ -487,6 +521,7 @@ def main():
         simulate=args.simulate,
         test=args.test,
         verbose=args.verbose,
+        run_ids=args.run_ids,
     ):
         log.warning(f"Could not close the day for {args.tel_id}!")
         # Send email, if later than 18:00 UTC and telescope is not ready to close

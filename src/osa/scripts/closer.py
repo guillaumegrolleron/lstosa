@@ -163,6 +163,13 @@ def post_process(seq_tuple):
     if dl1_datacheck_longterm_file_exits() and not options.test:
         if cfg.getboolean("lstchain", "create_longterm_symlink"):
             create_longterm_symlink()
+        log.info("Longterm datacheck file already exists — skipping sacct wait.")
+        if options.seqtoclose is None:
+            database = cfg.get("database", "path")
+            if database:
+                osadb.end_processing(date_to_iso(options.date))
+            return set_closed_with_file()
+        return False
 
     else:
         # Close the sequences
@@ -174,40 +181,77 @@ def post_process(seq_tuple):
         merge_muon_files(seq_list)
 
         # Merge DL1b files run-wise
+        dl1ab_job_ids = []
         for sequence in seq_list:
             dl1_merge_job_id = merge_files(sequence, data_level="DL1AB")
+            if dl1_merge_job_id:
+                dl1ab_job_ids.append(dl1_merge_job_id)
             # Produce DL2 files run-wise
             if not options.no_dl2 and sequence.type=="DATA":
                 dl1_to_dl2(sequence, dl1_merge_job_id)
+
+        if dl1ab_job_ids:
+            _wait_for_jobs(dl1ab_job_ids)
 
         # Merge DL1 datacheck files and produce PDFs. It also produces
         # the daily datacheck report using the longterm script, and updates
         # the longterm DL1 datacheck file with the cherenkov_transparency script.
         if cfg.getboolean("lstchain", "merge_dl1_datacheck"):
             list_job_id = merge_dl1_datacheck(seq_list)
-            create_datacheck_symlinks(list_job_id)
-            longterm_job_id = daily_datacheck(daily_longterm_cmd(list_job_id))
-            cherenkov_job_id = cherenkov_transparency(cherenkov_transparency_cmd(longterm_job_id))
-            if cfg.getboolean("lstchain", "create_longterm_symlink"):
-                create_longterm_symlink(cherenkov_job_id)
+            # Only create symlinks if datacheck jobs were actually submitted.
+            if list_job_id:
+                create_datacheck_symlinks(list_job_id)
+                # Only submit longterm/cherenkov jobs if create_longterm_symlink is enabled.
+                # For reprocessing, set create_longterm_symlink: False to skip this step.
+                if cfg.getboolean("lstchain", "create_longterm_symlink"):
+                    longterm_job_id = daily_datacheck(daily_longterm_cmd(list_job_id))
+                    cherenkov_job_id = cherenkov_transparency(cherenkov_transparency_cmd(longterm_job_id))
+                    create_longterm_symlink(cherenkov_job_id)
 
-        time.sleep(600)
-
-    # Check if all jobs launched by autocloser finished correctly 
-    # before creating the NightFinished.txt file
-    n_max = 6
-    n = 0
-    while not all_closer_jobs_finished_correctly() and n <= n_max:
-        log.info(
-            "All jobs launched by autocloser did not finished correctly yet. "
-            "Checking again in 10 minutes..."
+        # If no new jobs were submitted in this run (all outputs already existed),
+        # skip the sacct wait entirely and proceed to create NightFinished.txt.
+        new_jobs_submitted = bool(dl1ab_job_ids) or (
+            cfg.getboolean("lstchain", "merge_dl1_datacheck") and bool(list_job_id)
         )
-        time.sleep(600)
-        n += 1
+        if not new_jobs_submitted:
+            log.info("All closer outputs already existed — skipping sacct wait.")
+            if options.seqtoclose is None:
+                database = cfg.get("database", "path")
+                if database:
+                    osadb.end_processing(date_to_iso(options.date))
+                return set_closed_with_file()
+            return False
 
-    if n > n_max:
-        send_warning_mail(date=date_to_iso(options.date))
-        return False
+    # Check if all jobs launched by autocloser finished correctly
+    # before creating the NightFinished.txt file.
+    # Safety check: if there are no jobs in squeue, assume they're done.
+    import subprocess
+    try:
+        squeue_check = subprocess.run(
+            ["squeue", "--me", "--noheader", "-o", "%i"],
+            capture_output=True,
+            text=True,
+            timeout=5
+        )
+        jobs_in_queue = squeue_check.stdout.strip().split('\n') if squeue_check.stdout.strip() else []
+        if not jobs_in_queue or jobs_in_queue == ['']:
+            log.info("No jobs in squeue; assuming all closer jobs completed.")
+        else:
+            n_max = 6
+            n = 0
+            while not all_closer_jobs_finished_correctly() and n <= n_max:
+                log.info(
+                    "All jobs launched by autocloser did not finished correctly yet. "
+                    "Checking again in 10 minutes..."
+                )
+                time.sleep(600)
+                n += 1
+
+            if n > n_max:
+                send_warning_mail(date=date_to_iso(options.date))
+                return False
+    except (subprocess.TimeoutExpired, FileNotFoundError):
+        log.warning("Could not check squeue; proceeding with sacct checks.")
 
     if options.seqtoclose is None:
         database = cfg.get("database", "path")
@@ -379,7 +423,7 @@ def is_finished_check(run_summary):
     if run_summary is not None:
         # building the sequences (the same way as the sequencer)
         run_list = extract_runs(run_summary)
-        sequence_list = extract_sequences(options.date, run_list)
+        sequence_list = extract_sequences(options.date, run_list, run_ids=options.run_ids)
 
         if are_all_jobs_correctly_finished(sequence_list):
             sequence_success = True
@@ -413,6 +457,10 @@ def merge_dl1_datacheck(seq_list) -> List[str]:
     for sequence in seq_list:
         if sequence.type == "DATA":
             datacheck_dir = destination_dir("DATACHECK", create_dir=False, dl1_prod_id=sequence.dl1_prod_id)
+            merged_file = datacheck_dir / f"datacheck_dl1_LST-1.Run{sequence.run:05d}.h5"
+            if merged_file.exists():
+                log.info(f"Merged datacheck file {merged_file} already exists, skipping.")
+                continue
             cmd = [
                 "sbatch",
                 "--parsable",
@@ -502,12 +550,30 @@ def get_pattern(data_level) -> Tuple[str, str]:
     raise ValueError(f"Unknown data level {data_level}")
 
 
+def _wait_for_jobs(job_ids, poll_interval=30):
+    """Poll squeue until all specified job IDs have left the queue."""
+    ids_str = ",".join(str(j) for j in job_ids if j)
+    log.info(f"Waiting for SLURM jobs: {ids_str}")
+    while True:
+        result = subprocess.run(
+            ["squeue", "--noheader", "-j", ids_str],
+            capture_output=True,
+            text=True,
+        )
+        if not result.stdout.strip():
+            log.info("All jobs completed.")
+            return
+        n = len(result.stdout.strip().splitlines())
+        log.info(f"{n} job(s) still in queue, rechecking in {poll_interval}s...")
+        time.sleep(poll_interval)
+
+
 def merge_files(sequence, data_level="DL2"):
     """Merge DL1b or DL2 h5 files run-wise."""
     log.info(f"Looping over the sequences and merging the {data_level} files")
     pattern, prefix = get_pattern(data_level)
     slurm_account = cfg.get("SLURM", "ACCOUNT")
-    
+
     if sequence.type == "DATA":
         data_dir = destination_dir(
             data_level,
@@ -516,6 +582,10 @@ def merge_files(sequence, data_level="DL2"):
             dl2_prod_id=sequence.dl2_prod_id
             )
         merged_file = Path(data_dir) / f"{prefix}_LST-1.Run{sequence.run:05d}.h5"
+
+        if merged_file.exists():
+            log.info(f"Merged {data_level} file already exists for run {sequence.run:05d}, skipping.")
+            return None
 
         cmd = [
             "sbatch",
@@ -560,6 +630,10 @@ def merge_muon_files(sequence_list):
 
     for sequence in sequence_list:
         merged_file = Path(data_dir) / f"muons_LST-1.Run{sequence.run:05d}.fits"
+
+        if merged_file.exists():
+            log.info(f"Merged muon file already exists for run {sequence.run:05d}, skipping.")
+            continue
 
         cmd = [
             "sbatch",
@@ -675,10 +749,11 @@ def all_closer_jobs_finished_correctly():
     """Check if all the jobs launched by autocloser finished correctly."""
     sacct_output = run_sacct()
     jobs_closer = get_closer_sacct_output(sacct_output)
-    if len(jobs_closer[jobs_closer["State"]!="COMPLETED"])==0:
-        return True
-    else:
-        return False
+    # Accept all terminal states; only keep waiting when jobs are still active.
+    # CANCELLED covers both manual scancel and DependencyNeverSatisfied auto-cancel.
+    terminal_states = {"COMPLETED", "CANCELLED", "TIMEOUT", "NODE_FAIL", "OUT_OF_MEMORY"}
+    still_active = jobs_closer[~jobs_closer["State"].isin(terminal_states)]
+    return len(still_active) == 0
 
 
 if __name__ == "__main__":

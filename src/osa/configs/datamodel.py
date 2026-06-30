@@ -71,3 +71,5 @@ class SequenceData(Sequence):
         self.datacheckstatus = None
         self.dl2status = None
         self.dl3status = None
+        self.dl2_prod_id = None
+        self.rf_model = None
