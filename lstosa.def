@@ -91,6 +91,10 @@ PY
     # Keep matplotlib/astropy/ctapipe caches off the network FS unless the caller
     # overrides them (the lstosa config also sets these per-run).
     export MPLCONFIGDIR=${MPLCONFIGDIR:-/tmp/mpl-$USER}
+    # /opt/conda is a read-only squashfs at runtime, so numba's @njit(cache=True)
+    # functions (e.g. ctapipe.image.statistics) can't write their cache next to
+    # the source file. Redirect numba's cache to a writable location.
+    export NUMBA_CACHE_DIR=${NUMBA_CACHE_DIR:-/tmp/numba-$USER}
 
 %runscript
     # `apptainer run lstosa_v0.12.sif <cmd> <args>` executes inside the env.
@@ -99,6 +103,9 @@ PY
 %test
     set -e
     export PATH=/opt/conda/bin:$PATH
+    # %test runs against the finalized read-only SIF, so numba can't cache
+    # next to the (read-only) source; redirect it (see %environment).
+    export NUMBA_CACHE_DIR=/tmp/numba-test
     python -c "import lstchain, ctapipe, ctapipe_io_lst, osa; print('container OK', lstchain.__version__)"
     sequencer --help >/dev/null && echo "sequencer entrypoint OK"
 
