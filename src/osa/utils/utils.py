@@ -73,27 +73,27 @@ def get_lstchain_version():
 
 def container_prefix():
     """
-    Return the command prefix that runs job commands inside an Apptainer/Singularity
+    Return the command prefix that runs job commands inside a Singularity
     image, as configured in the ``[lstchain]`` section of the config file.
 
-    If ``apptainer_image`` is empty/unset this returns an empty list, so callers
+    If ``singularity_image`` is empty/unset this returns an empty list, so callers
     keep running on the host environment exactly as before (no behaviour change).
     When set, job commands are wrapped as
-    ``apptainer exec [--bind <apptainer_binds>] [<apptainer_options>] <image> <cmd> ...``
+    ``singularity exec [--bind <singularity_binds>] [<singularity_options>] <image> <cmd> ...``
     which avoids the per-job cost of activating a conda env on the shared filesystem.
 
     Returns
     -------
     list of str
     """
-    image = cfg.get("lstchain", "apptainer_image", fallback="").strip()
+    image = cfg.get("lstchain", "singularity_image", fallback="").strip()
     if not image:
         return []
-    prefix = ["apptainer", "exec"]
-    binds = cfg.get("lstchain", "apptainer_binds", fallback="").strip()
+    prefix = ["singularity", "exec"]
+    binds = cfg.get("lstchain", "singularity_binds", fallback="").strip()
     if binds:
         prefix += ["--bind", binds]
-    extra = cfg.get("lstchain", "apptainer_options", fallback="").strip()
+    extra = cfg.get("lstchain", "singularity_options", fallback="").strip()
     if extra:
         prefix += extra.split()
     prefix.append(image)

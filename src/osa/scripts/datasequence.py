@@ -13,7 +13,7 @@ from osa.paths import get_catB_calibration_filename
 from osa.utils.cliopts import data_sequence_cli_parsing
 from osa.utils.logging import myLogger
 from osa.utils.utils import date_to_dir
-from osa.paths import catB_closed_file_exists
+from osa.paths import catB_closed_file_exists, catB_calibration_file_valid
 
 __all__ = ["data_sequence", "r0_to_dl1", "dl1ab", "dl1_datacheck"]
 
@@ -199,9 +199,19 @@ def dl1ab(run_str: str, dl1b_config: Path, dl1_prod_id: str) -> int:
         cmd.append("--no-image=True")
 
     if cfg.getboolean("lstchain", "apply_catB_calibration"):
-        if catB_closed_file_exists(int(run_str[:5])):
-            catB_calibration_file = get_catB_calibration_filename(int(run_str[:5]))
+        run_id = int(run_str[:5])
+        if catB_closed_file_exists(run_id) and catB_calibration_file_valid(run_id):
+            catB_calibration_file = get_catB_calibration_filename(run_id)
             cmd.append(f"--catB-calibration-file={catB_calibration_file}")
+        elif catB_closed_file_exists(run_id):
+            # Marked closed but the Cat-B file is missing/invalid (no
+            # /tel_1/calibration). Refuse to run DL1ab with a broken Cat-B file
+            # rather than crash midway; this run needs a valid Cat-B first.
+            log.error(
+                f"Cat-B calibration file for run {run_str[:5]} is invalid "
+                f"(no /tel_1/calibration); skipping DL1ab for this run."
+            )
+            sys.exit(0)
         else:
             log.info(
                 f"Cat-B calibration did not finish yet for run {run_str[:5]}. "

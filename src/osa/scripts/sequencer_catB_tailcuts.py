@@ -19,6 +19,7 @@ from lstchain.onsite import find_systematics_correction_file
 from osa.paths import (
     catB_closed_file_exists,
     catB_calibration_file_exists,
+    catB_calibration_file_valid,
     analysis_path,
     get_major_version,
     search_calibration_files,
@@ -135,14 +136,24 @@ def launch_catB_calibration(run_id: int):
             log.debug(f"Job {job_id} (corresponding to run {run_id:05d}) is still running.")
 
         elif job_status.item() == "COMPLETED":
-            catB_closed_file = Path(options.directory) / f"catB_{run_id:05d}.closed"
-            catB_closed_file.touch()
-            log.debug(
-                f"Cat-B job {job_id} (corresponding to run {run_id:05d}) finished "
-                f"successfully. Creating file {catB_closed_file}"
-            )
+            # Even a COMPLETED job can leave an invalid file (e.g. 0 flatfield
+            # events). Only mark Cat-B as done if the file really holds the
+            # /tel_1/calibration table, so DL1ab never consumes a broken file.
+            if catB_calibration_file_valid(run_id):
+                catB_closed_file = Path(options.directory) / f"catB_{run_id:05d}.closed"
+                catB_closed_file.touch()
+                log.debug(
+                    f"Cat-B job {job_id} (corresponding to run {run_id:05d}) finished "
+                    f"successfully. Creating file {catB_closed_file}"
+                )
+            else:
+                log.warning(
+                    f"Cat-B job {job_id} (run {run_id:05d}) reported COMPLETED but the "
+                    f"calibration file is missing/invalid (no /tel_1/calibration). "
+                    f"Not marking it done; this run cannot be DL1ab-calibrated."
+                )
 
-        else: 
+        else:
             log.warning(f"Cat-B job {job_id} (corresponding to run {run_id:05d}) failed.")
 
     else:
@@ -201,8 +212,8 @@ def launch_catB_calibration(run_id: int):
         if options.overwrite_catB:
             inner.append("--yes")
 
-        # Optionally run the command inside an apptainer image (see [lstchain]
-        # apptainer_image). sbatch needs a script, so the container call is passed
+        # Optionally run the command inside an singularity image (see [lstchain]
+        # singularity_image). sbatch needs a script, so the container call is passed
         # via --wrap. Skipped when the Cat-B lstcam-env is used (not in the image).
         prefix = container_prefix()
         if prefix and not cfg.getboolean("lstchain", "use_lstcam_env_for_CatB_calib"):
@@ -237,8 +248,8 @@ def launch_tailcuts_finder(run_id: int):
         f"--run={run_id}",
         f"--output-dir={output_dir}",
     ]
-    # Optionally run lstchain_find_tailcuts inside an apptainer image via --wrap
-    # (see [lstchain] apptainer_image); unchanged host submission when unset.
+    # Optionally run lstchain_find_tailcuts inside an singularity image via --wrap
+    # (see [lstchain] singularity_image); unchanged host submission when unset.
     prefix = container_prefix()
     if prefix:
         cmd = sbatch_opts + ["--wrap", shlex.join(prefix + inner)]
@@ -295,14 +306,23 @@ def main():
         else:
             # launch catB calibration and tailcut finder in parallel
             if cfg.getboolean("lstchain", "apply_catB_calibration") and not catB_closed_file_exists(run_id):
-                if catB_calibration_file_exists(run_id):
-                    # Calibration file already produced (e.g. by a previous run) but
-                    # the .closed marker is missing — just create it.
+                if catB_calibration_file_valid(run_id):
+                    # Valid calibration file already produced (e.g. by a previous run)
+                    # but the .closed marker is missing — just create it.
                     catB_closed_file = Path(options.directory) / f"catB_{run_id:05d}.closed"
                     catB_closed_file.touch()
                     log.info(
                         f"Cat-B calibration file already exists for run {run_id:05d}. "
                         f"Created missing .closed file: {catB_closed_file}"
+                    )
+                elif catB_calibration_file_exists(run_id):
+                    # File is present but invalid (failed job left an empty stub, e.g.
+                    # no flatfield events). Do NOT mark it done and do NOT feed it to
+                    # DL1ab; leave the run un-closed so it is not silently mis-calibrated.
+                    log.warning(
+                        f"Cat-B calibration file for run {run_id:05d} exists but is invalid "
+                        f"(no /tel_1/calibration). Cat-B could not be computed for this run "
+                        f"(check the Cat-B log, e.g. 0 flatfield events); skipping it."
                     )
                 else:
                     launch_catB_calibration(run_id)

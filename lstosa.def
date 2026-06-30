@@ -1,5 +1,5 @@
 ## ─────────────────────────────────────────────────────────────────────────────
-## Apptainer/Singularity definition file for the LST-1 on-site analysis (lstosa).
+## singularity/Singularity definition file for the LST-1 on-site analysis (lstosa).
 ##
 ## Goal: bake lstchain + lstosa + their full dependency tree into a single SIF
 ## image so SLURM jobs no longer pay the per-job cost of activating a conda env
@@ -11,23 +11,23 @@
 ##
 ## ── Build ────────────────────────────────────────────────────────────────────
 ##   cd /fefs/aswg/workspace/guillaume.grolleron/project/lstosa
-##   apptainer build lstosa_v0.12.sif lstosa.def
-##   # (use --fakeroot if you are not root:  apptainer build --fakeroot ...)
+##   singularity build lstosa_v0.12.sif lstosa.def
+##   # (use --fakeroot if you are not root:  singularity build --fakeroot ...)
 ##
 ## ── Use ──────────────────────────────────────────────────────────────────────
 ##   # one-off command
-##   apptainer exec lstosa_v0.12.sif sequencer --version
-##   apptainer exec lstosa_v0.12.sif lstchain_data_r0_to_dl1 --help
+##   singularity exec lstosa_v0.12.sif sequencer --version
+##   singularity exec lstosa_v0.12.sif lstchain_data_r0_to_dl1 --help
 ##
-##   # bind the data trees the pipeline reads/writes (Apptainer auto-binds $HOME
+##   # bind the data trees the pipeline reads/writes (singularity auto-binds $HOME
 ##   # and the CWD, but /fefs subtrees usually need to be explicit):
-##   apptainer exec \
+##   singularity exec \
 ##       --bind /fefs/aswg,/fefs/onsite,/fefs/home \
 ##       lstosa_v0.12.sif datasequence ...
 ##
 ##   # ACTIVE DEVELOPMENT of lstosa: bind your host checkout over /opt/lstosa so
 ##   # your edits are live without rebuilding (the image installed it editable):
-##   apptainer exec \
+##   singularity exec \
 ##       --bind /fefs/aswg/workspace/guillaume.grolleron/project/lstosa:/opt/lstosa \
 ##       --bind /fefs/aswg,/fefs/onsite,/fefs/home \
 ##       lstosa_v0.12.sif sequencer ...
@@ -47,24 +47,27 @@ From: mambaorg/micromamba:1.5.8
 %post
     set -eux
     export MAMBA_ROOT_PREFIX=/opt/conda
-    export PIP_NO_CACHE_DIR=1
 
-    # ---- base interpreter + build tools ------------------------------------
-    # c-/cxx-compiler pull a conda-forge gcc/g++ toolchain and export CC/CXX on
-    # activation, so source builds (e.g. gammapy's Cython fit_statistics_cython
-    # extension) that lstchain drags in don't fail with "gcc: No such file".
+    # ---- Reproduce the known-good conda-forge stack ------------------------
+    # The production host env installs EVERYTHING from conda-forge, including
+    # lstchain and every compiled dependency (numpy, numba, llvmlite, protozfits,
+    # eventio, ctapipe, ...). Installing lstchain from conda-forge here pulls the
+    # same conda-forge builds, instead of pip manylinux wheels — which is what
+    # caused the SIGSEGV (exit -11) core dumps in r0_to_dl1 on the compute nodes.
+    # lstchain=0.12.2 constrains ctapipe 0.25.x / ctapipe_io_lst 0.29.x / gammapy 1.3,
+    # matching the production environment. The extra packages are lstosa's
+    # pure-python deps not necessarily dragged in by lstchain.
     micromamba install -y -n base -c conda-forge \
-        python=3.11 pip git c-compiler cxx-compiler
+        python=3.11 pip git \
+        lstchain=0.12.2 \
+        pydot pydotplus prov pymongo toml psutil pyyaml click setuptools
     eval "$(micromamba shell hook --shell posix)"
     micromamba activate base
 
-    # ---- lstchain (pulls the matched ctapipe / ctapipe_io_lst / gammapy etc.)
-    # Pin the exact production version so the image reproduces v0.12 outputs.
-    pip install "lstchain==0.12.2"
-
-    # ---- lstosa itself (editable; its pyproject deps fill in pydot, prov,
-    #      pymongo, tenacity, click, psutil, toml, pyyaml, ...) ---------------
-    pip install -e /opt/lstosa
+    # ---- lstosa itself (editable, --no-deps: the whole dependency tree is
+    #      already provided by conda-forge above, so pip must NOT pull any wheel
+    #      that could reintroduce a mismatched compiled build) ----------------
+    pip install --no-deps -e /opt/lstosa
 
     # ---- slim the image ----------------------------------------------------
     rm -rf /opt/lstosa/.git
@@ -97,7 +100,7 @@ PY
     export NUMBA_CACHE_DIR=${NUMBA_CACHE_DIR:-/tmp/numba-$USER}
 
 %runscript
-    # `apptainer run lstosa_v0.12.sif <cmd> <args>` executes inside the env.
+    # `singularity run lstosa_v0.12.sif <cmd> <args>` executes inside the env.
     exec "$@"
 
 %test
@@ -118,20 +121,20 @@ PY
     Description LST-1 on-site analysis (lstosa) pipeline image for DL1 reprocessing (PROD_ID v0.12)
 
 %help
-    Apptainer image for the LST-1 on-site analysis pipeline (lstosa) pinned to the
+    singularity image for the LST-1 on-site analysis pipeline (lstosa) pinned to the
     v0.12 production stack (lstchain 0.12.2 / ctapipe 0.25.1). Built to replace the
     network-filesystem conda environment so SLURM jobs start fast.
 
     Build:
         cd <lstosa repo root>
-        apptainer build lstosa_v0.12.sif lstosa.def
+        singularity build lstosa_v0.12.sif lstosa.def
 
     Run a pipeline command (bind the data trees it touches):
-        apptainer exec --bind /fefs/aswg,/fefs/onsite,/fefs/home \
+        singularity exec --bind /fefs/aswg,/fefs/onsite,/fefs/home \
             lstosa_v0.12.sif datasequence --help
 
     Live-edit lstosa without rebuilding (bind your checkout over /opt/lstosa):
-        apptainer exec --bind <host>/lstosa:/opt/lstosa,/fefs/aswg \
+        singularity exec --bind <host>/lstosa:/opt/lstosa,/fefs/aswg \
             lstosa_v0.12.sif sequencer ...
 
     NOTE: This image does NOT include lstcam_calib (Cat-A calibration), which the

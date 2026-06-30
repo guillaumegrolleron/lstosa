@@ -520,9 +520,32 @@ def catB_calibration_file_exists(run_id: int) -> bool:
     prod_id = utils.get_lstchain_version()
     night_dir = utils.date_to_dir(options.date)
     filters = utils.get_calib_filters(run_id)
-    catB_calib_dir = catB_calib_base_dir / "calibration" / night_dir / prod_id 
+    catB_calib_dir = catB_calib_base_dir / "calibration" / night_dir / prod_id
     catB_calib_file = catB_calib_dir / f"cat_B_calibration_filters_{filters}.Run{run_id:05d}.h5"
     return catB_calib_file.exists()
+
+
+def catB_calibration_file_valid(run_id: int) -> bool:
+    """
+    Return True only if the Cat-B calibration file exists *and* actually contains
+    the ``/tel_1/calibration`` table, i.e. the calibration was really computed.
+
+    A failed Cat-B job (e.g. no flatfield interleaved events collected) can leave
+    behind an empty stub .h5 that lacks this node; consuming it later makes
+    ``lstchain_dl1ab`` crash with NoSuchNodeError. This check lets callers treat
+    such a run as "Cat-B not done" instead of falsely marking it finished.
+    """
+    if not catB_calibration_file_exists(run_id):
+        return False
+    catB_file = get_catB_calibration_filename(run_id)
+    try:
+        import tables
+
+        with tables.open_file(str(catB_file), "r") as h5:
+            return "/tel_1/calibration" in h5
+    except Exception as err:  # unreadable / corrupted / truncated file
+        log.warning(f"Cat-B calibration file {catB_file} is not readable: {err}")
+        return False
 
 
 def get_dl1_prod_id(config_filename):
